@@ -8,6 +8,7 @@ import types
 import unittest
 from unittest.mock import MagicMock, patch, call
 
+import requests
 import yaml
 
 # ---------------------------------------------------------------------------
@@ -152,6 +153,45 @@ class TestCheckOnvif(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# is_http_reachable
+# ---------------------------------------------------------------------------
+
+class TestIsHttpReachable(unittest.TestCase):
+    @patch("watchdog.requests.get")
+    def test_reachable(self, mock_get):
+        mock_get.return_value = MagicMock(status_code=200)
+        self.assertTrue(watchdog.is_http_reachable("10.0.0.1", 80))
+
+    @patch("watchdog.requests.get")
+    def test_non_200_still_reachable(self, mock_get):
+        # Any HTTP response (even 401/404) means the camera is up
+        mock_get.return_value = MagicMock(status_code=401)
+        self.assertTrue(watchdog.is_http_reachable("10.0.0.1", 80))
+
+    @patch("watchdog.requests.get", side_effect=requests.exceptions.ConnectionError)
+    def test_connection_error_not_reachable(self, mock_get):
+        self.assertFalse(watchdog.is_http_reachable("10.0.0.1", 80))
+
+    @patch("watchdog.requests.get", side_effect=requests.exceptions.Timeout)
+    def test_timeout_not_reachable(self, mock_get):
+        self.assertFalse(watchdog.is_http_reachable("10.0.0.1", 80))
+
+    @patch("watchdog.requests.get")
+    def test_https_for_port_443(self, mock_get):
+        mock_get.return_value = MagicMock(status_code=200)
+        watchdog.is_http_reachable("10.0.0.1", 443)
+        called_url = mock_get.call_args[0][0]
+        self.assertTrue(called_url.startswith("https://"))
+
+    @patch("watchdog.requests.get")
+    def test_custom_port_in_url(self, mock_get):
+        mock_get.return_value = MagicMock(status_code=200)
+        watchdog.is_http_reachable("10.0.0.1", 8080)
+        called_url = mock_get.call_args[0][0]
+        self.assertIn(":8080", called_url)
+
+
+# ---------------------------------------------------------------------------
 # cycle_services
 # ---------------------------------------------------------------------------
 
@@ -236,25 +276,36 @@ class TestWatchCamera(unittest.TestCase):
             "username": "admin",
         }
 
+    @patch("watchdog.is_http_reachable", return_value=True)
     @patch("watchdog.cycle_services")
     @patch("watchdog.check_onvif", return_value=True)
-    def test_healthy_camera_no_cycle(self, mock_check, mock_cycle):
+    def test_healthy_camera_no_cycle(self, mock_check, mock_cycle, mock_reach):
         watchdog.watch_camera(self._cam_cfg(), self._global_cfg())
         mock_cycle.assert_not_called()
         mock_check.assert_called_once()
 
+    @patch("watchdog.is_http_reachable", return_value=False)
+    @patch("watchdog.cycle_services")
+    @patch("watchdog.check_onvif")
+    def test_unreachable_camera_skips_onvif_and_cycle(self, mock_check, mock_cycle, mock_reach):
+        watchdog.watch_camera(self._cam_cfg(), self._global_cfg())
+        mock_check.assert_not_called()
+        mock_cycle.assert_not_called()
+
+    @patch("watchdog.is_http_reachable", return_value=True)
     @patch("watchdog.time.sleep")
     @patch("watchdog.cycle_services")
     @patch("watchdog.check_onvif", return_value=False)
-    def test_all_retries_fail_triggers_cycle(self, mock_check, mock_cycle, mock_sleep):
+    def test_all_retries_fail_triggers_cycle(self, mock_check, mock_cycle, mock_sleep, mock_reach):
         watchdog.watch_camera(self._cam_cfg(), self._global_cfg(retry_count=3))
         self.assertEqual(mock_check.call_count, 3)
         mock_cycle.assert_called_once()
 
+    @patch("watchdog.is_http_reachable", return_value=True)
     @patch("watchdog.time.sleep")
     @patch("watchdog.cycle_services")
     @patch("watchdog.check_onvif", side_effect=[False, False, True])
-    def test_succeeds_on_third_attempt_no_cycle(self, mock_check, mock_cycle, mock_sleep):
+    def test_succeeds_on_third_attempt_no_cycle(self, mock_check, mock_cycle, mock_sleep, mock_reach):
         watchdog.watch_camera(self._cam_cfg(), self._global_cfg(retry_count=3))
         self.assertEqual(mock_check.call_count, 3)
         mock_cycle.assert_not_called()

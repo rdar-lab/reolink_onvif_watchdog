@@ -86,6 +86,33 @@ def get_password(camera_name: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# HTTP reachability check
+# ---------------------------------------------------------------------------
+
+def is_http_reachable(ip: str, http_port: int, timeout: int = 5) -> bool:
+    """
+    Return True if the camera responds to a plain HTTP/HTTPS request.
+
+    This is used as a pre-flight check before attempting ONVIF.  If the
+    camera is entirely offline (power loss, network outage) there is no
+    point cycling ONVIF/RTSP — the API call would fail anyway.
+    """
+    scheme = "https" if http_port == 443 else "http"
+    port_suffix = f":{http_port}" if http_port not in (80, 443) else ""
+    url = f"{scheme}://{ip}{port_suffix}/"
+    try:
+        requests.get(url, timeout=timeout, verify=False)  # noqa: S501 — self-signed certs are common on cameras
+        return True
+    except requests.exceptions.ConnectionError:
+        return False
+    except requests.exceptions.Timeout:
+        return False
+    except Exception as exc:
+        logger.debug("Unexpected error during HTTP reachability check for %s: %s", ip, exc)
+        return False
+
+
+# ---------------------------------------------------------------------------
 # ONVIF health-check
 # ---------------------------------------------------------------------------
 
@@ -208,6 +235,17 @@ def watch_camera(camera_cfg: dict, global_cfg: dict) -> None:
     cycle_wait = global_cfg.get("cycle_wait", DEFAULT_CONFIG["cycle_wait"])
 
     log = logging.getLogger(f"onvif_watchdog.{name}")
+
+    # Pre-flight: skip cameras that are completely unreachable via HTTP/HTTPS.
+    # If the camera is offline there is nothing we can do via the API.
+    if not is_http_reachable(ip, http_port):
+        log.warning(
+            "Camera '%s' (%s) is not reachable via HTTP/HTTPS. "
+            "Skipping ONVIF check (camera may be offline).",
+            name,
+            ip,
+        )
+        return
 
     for attempt in range(1, retry_count + 1):
         log.info("Attempt %d/%d for camera '%s' (%s)…", attempt, retry_count, name, ip)
