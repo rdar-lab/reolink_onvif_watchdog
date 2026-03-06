@@ -3,6 +3,7 @@ Unit tests for watchdog.py
 """
 
 import os
+import tempfile
 import time
 import types
 import unittest
@@ -33,8 +34,6 @@ import watchdog  # noqa: E402 — must come after stub setup
 
 class TestLoadConfig(unittest.TestCase):
     def test_valid_config(self):
-        import tempfile
-
         cfg_data = {
             "check_interval": 15,
             "retry_count": 2,
@@ -61,8 +60,6 @@ class TestLoadConfig(unittest.TestCase):
             watchdog.load_config("/nonexistent/path/config.yaml")
 
     def test_defaults_applied(self):
-        import tempfile
-
         with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as fh:
             yaml.dump({"cameras": []}, fh)
             path = fh.name
@@ -71,6 +68,45 @@ class TestLoadConfig(unittest.TestCase):
             config = watchdog.load_config(path)
             self.assertEqual(config["check_interval"], watchdog.DEFAULT_CONFIG["check_interval"])
             self.assertEqual(config["retry_count"], watchdog.DEFAULT_CONFIG["retry_count"])
+        finally:
+            os.unlink(path)
+
+    def test_missing_ip_raises(self):
+        cfg_data = {"cameras": [{"name": "nocam"}]}
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as fh:
+            yaml.dump(cfg_data, fh)
+            path = fh.name
+
+        try:
+            with self.assertRaises(ValueError) as ctx:
+                watchdog.load_config(path)
+            self.assertIn("ip", str(ctx.exception))
+        finally:
+            os.unlink(path)
+
+    def test_non_int_port_raises(self):
+        cfg_data = {"cameras": [{"name": "cam1", "ip": "10.0.0.1", "onvif_port": "not-an-int"}]}
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as fh:
+            yaml.dump(cfg_data, fh)
+            path = fh.name
+
+        try:
+            with self.assertRaises(ValueError) as ctx:
+                watchdog.load_config(path)
+            self.assertIn("onvif_port", str(ctx.exception))
+        finally:
+            os.unlink(path)
+
+    def test_cameras_not_a_list_raises(self):
+        cfg_data = {"cameras": "not-a-list"}
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as fh:
+            yaml.dump(cfg_data, fh)
+            path = fh.name
+
+        try:
+            with self.assertRaises(ValueError) as ctx:
+                watchdog.load_config(path)
+            self.assertIn("list", str(ctx.exception))
         finally:
             os.unlink(path)
 
@@ -323,8 +359,6 @@ class TestMain(unittest.TestCase):
     @patch("watchdog.time.sleep", side_effect=KeyboardInterrupt)
     @patch("watchdog.watch_camera")
     def test_main_runs_one_iteration(self, mock_watch, mock_sleep):
-        import tempfile
-
         cfg_data = {
             "check_interval": 5,
             "retry_count": 1,

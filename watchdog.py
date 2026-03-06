@@ -63,7 +63,41 @@ def load_config(path: str) -> dict:
 
     config = {**DEFAULT_CONFIG, **(data or {})}
 
-    if not config["cameras"]:
+    # Validate cameras list structure and required per-camera fields.
+    cameras = config.get("cameras")
+    if cameras is None:
+        cameras = []
+        config["cameras"] = cameras
+
+    if not isinstance(cameras, list):
+        raise ValueError(
+            f"Configuration error: 'cameras' must be a list, got {type(cameras).__name__}."
+        )
+
+    for idx, cam in enumerate(cameras):
+        if not isinstance(cam, dict):
+            raise ValueError(
+                f"Configuration error: camera entry at index {idx} must be a mapping, "
+                f"got {type(cam).__name__}."
+            )
+
+        cam_name = cam.get("name") or f"index {idx}"
+
+        ip = cam.get("ip")
+        if ip is None or not str(ip).strip():
+            raise ValueError(
+                f"Configuration error for camera '{cam_name}': missing or empty 'ip' field."
+            )
+
+        for key, value in cam.items():
+            if key == "port" or key.endswith("_port"):
+                if not isinstance(value, int):
+                    raise ValueError(
+                        f"Configuration error for camera '{cam_name}': "
+                        f"field '{key}' must be an integer, got {type(value).__name__}."
+                    )
+
+    if not cameras:
         logger.warning("No cameras defined in configuration file.")
 
     return config
@@ -280,6 +314,9 @@ def main(config_path: str = "config.yaml") -> None:
         sys.exit(1)
     except yaml.YAMLError as exc:
         logger.error("Invalid YAML configuration: %s", exc)
+        sys.exit(1)
+    except ValueError as exc:
+        logger.error("%s", exc)
         sys.exit(1)
 
     cameras = config.get("cameras", [])
