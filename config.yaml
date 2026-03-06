@@ -1,0 +1,33 @@
+# Reolink ONVIF Watchdog — Configuration
+#
+# Passwords are NOT stored here. Set them as environment variables:
+#   CAMERA_PASSWORD_<NAME>   where <NAME> matches the camera name in uppercase
+#   e.g. CAMERA_PASSWORD_FRONTDOOR for the camera named "frontdoor"
+#
+# A single fallback variable CAMERA_PASSWORD is used when no per-camera
+# variable is found.
+
+# How often (seconds) to run the ONVIF health check for each camera
+check_interval: 30
+
+# Number of consecutive failures before triggering a service cycle
+retry_count: 3
+
+# Seconds to wait between individual retry attempts
+retry_delay: 5
+
+# Seconds to keep ONVIF/RTSP disabled before re-enabling them
+cycle_wait: 60
+
+cameras:
+  - name: frontdoor
+    ip: 192.168.1.100
+    onvif_port: 8000
+    http_port: 80
+    username: admin
+
+  - name: backyard
+    ip: 192.168.1.101
+    onvif_port: 8000
+    http_port: 80
+    username: admin

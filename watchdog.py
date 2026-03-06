@@ -1,0 +1,267 @@
+"""
+Reolink ONVIF Watchdog
+======================
+Periodically checks each configured camera via ONVIF (snapshot pull).
+When a camera's ONVIF check fails repeatedly, the script:
+  1. Disables ONVIF *and* RTSP via the Reolink HTTP API.
+  2. Waits a configurable number of seconds (default 60 s).
+  3. Re-enables both services.
+
+Configuration is read from a YAML file (default: config.yaml).
+Passwords are supplied through environment variables so that secrets are
+never stored in the configuration file:
+  - Per-camera:  CAMERA_PASSWORD_<NAME_UPPERCASE>
+                 e.g. CAMERA_PASSWORD_FRONTDOOR for a camera named "frontdoor"
+  - Fallback:    CAMERA_PASSWORD
+"""
+
+import logging
+import os
+import sys
+import time
+from typing import Optional
+
+import requests
+import yaml
+from onvif import ONVIFCamera
+
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    datefmt="%Y-%m-%dT%H:%M:%S",
+)
+logger = logging.getLogger("onvif_watchdog")
+
+
+# ---------------------------------------------------------------------------
+# Configuration helpers
+# ---------------------------------------------------------------------------
+
+DEFAULT_CONFIG = {
+    "check_interval": 30,
+    "retry_count": 3,
+    "retry_delay": 5,
+    "cycle_wait": 60,
+    "cameras": [],
+}
+
+
+def load_config(path: str) -> dict:
+    """Load and validate configuration from a YAML file."""
+    with open(path, "r") as fh:
+        data = yaml.safe_load(fh)
+
+    config = {**DEFAULT_CONFIG, **(data or {})}
+
+    if not config["cameras"]:
+        logger.warning("No cameras defined in configuration file.")
+
+    return config
+
+
+def get_password(camera_name: str) -> str:
+    """
+    Resolve the camera password from environment variables.
+
+    Lookup order:
+    1. CAMERA_PASSWORD_<NAME_UPPERCASE>  (per-camera)
+    2. CAMERA_PASSWORD                   (global fallback)
+    """
+    per_camera_var = f"CAMERA_PASSWORD_{camera_name.upper()}"
+    password = os.environ.get(per_camera_var)
+    if password is None:
+        password = os.environ.get("CAMERA_PASSWORD", "")
+    if not password:
+        logger.warning(
+            "No password found for camera '%s'. "
+            "Set %s or CAMERA_PASSWORD environment variable.",
+            camera_name,
+            per_camera_var,
+        )
+    return password
+
+
+# ---------------------------------------------------------------------------
+# ONVIF health-check
+# ---------------------------------------------------------------------------
+
+def check_onvif(ip: str, onvif_port: int, username: str, password: str) -> bool:
+    """
+    Connect to the camera via ONVIF and attempt to download a snapshot.
+
+    Returns True on success, False on any failure.
+    """
+    try:
+        cam = ONVIFCamera(ip, onvif_port, username, password)
+        media = cam.create_media_service()
+        profiles = media.GetProfiles()
+
+        token = profiles[0].token
+        req = media.create_type("GetSnapshotUri")
+        req.ProfileToken = token
+        result = media.GetSnapshotUri(req)
+
+        response = requests.get(
+            result.Uri,
+            auth=requests.auth.HTTPDigestAuth(username, password),
+            timeout=10,
+            verify=True,
+        )
+        if response.status_code == 200:
+            logger.info("ONVIF check passed for %s.", ip)
+            return True
+
+        logger.warning(
+            "Snapshot download failed for %s: HTTP %s.", ip, response.status_code
+        )
+        return False
+
+    except Exception as exc:
+        logger.warning("ONVIF check failed for %s: %s", ip, exc)
+        return False
+
+
+# ---------------------------------------------------------------------------
+# Reolink API — service cycling
+# ---------------------------------------------------------------------------
+
+def _reolink_post(base_url: str, payload: list, timeout: int = 10) -> Optional[requests.Response]:
+    """Send a JSON command to the Reolink HTTP API."""
+    try:
+        resp = requests.post(base_url, json=payload, timeout=timeout)
+        resp.raise_for_status()
+        return resp
+    except Exception as exc:
+        logger.error("Reolink API call failed: %s", exc)
+        return None
+
+
+def cycle_services(
+    ip: str,
+    http_port: int,
+    username: str,
+    password: str,
+    cycle_wait: int,
+) -> None:
+    """
+    Disable ONVIF and RTSP, wait, then re-enable both.
+
+    The Reolink SetNetPort command accepts a single NetPort object so both
+    flags are toggled together in one request.
+    """
+    logger.warning("ONVIF failure detected for %s. Cycling ONVIF and RTSP…", ip)
+
+    port_suffix = f":{http_port}" if http_port not in (80, 443) else ""
+    scheme = "https" if http_port == 443 else "http"
+    # Reolink's CGI API requires credentials in the query string.
+    # Use HTTPS (port 443) to encrypt the transport when possible.
+    base_url = (
+        f"{scheme}://{ip}{port_suffix}/cgi-bin/api.cgi"
+        f"?user={username}&password={password}"
+    )
+
+    off_payload = [
+        {
+            "cmd": "SetNetPort",
+            "param": {"NetPort": {"onvifEnable": 0, "rtspEnable": 0}},
+        }
+    ]
+    on_payload = [
+        {
+            "cmd": "SetNetPort",
+            "param": {"NetPort": {"onvifEnable": 1, "rtspEnable": 1}},
+        }
+    ]
+
+    if _reolink_post(base_url, off_payload) is not None:
+        logger.info("ONVIF and RTSP disabled for %s. Waiting %d s…", ip, cycle_wait)
+        time.sleep(cycle_wait)
+        if _reolink_post(base_url, on_payload) is not None:
+            logger.info("ONVIF and RTSP re-enabled for %s.", ip)
+        else:
+            logger.error("Failed to re-enable services for %s!", ip)
+    else:
+        logger.error(
+            "Could not reach Reolink API for %s. Services may still be running.", ip
+        )
+
+
+# ---------------------------------------------------------------------------
+# Per-camera watchdog loop
+# ---------------------------------------------------------------------------
+
+def watch_camera(camera_cfg: dict, global_cfg: dict) -> None:
+    """Run one full check cycle for a single camera."""
+    name = camera_cfg.get("name", camera_cfg.get("ip", "unknown"))
+    ip = camera_cfg["ip"]
+    onvif_port = camera_cfg.get("onvif_port", 8000)
+    http_port = camera_cfg.get("http_port", 80)
+    username = camera_cfg.get("username", "admin")
+    password = get_password(name)
+
+    retry_count = global_cfg.get("retry_count", DEFAULT_CONFIG["retry_count"])
+    retry_delay = global_cfg.get("retry_delay", DEFAULT_CONFIG["retry_delay"])
+    cycle_wait = global_cfg.get("cycle_wait", DEFAULT_CONFIG["cycle_wait"])
+
+    log = logging.getLogger(f"onvif_watchdog.{name}")
+
+    for attempt in range(1, retry_count + 1):
+        log.info("Attempt %d/%d for camera '%s' (%s)…", attempt, retry_count, name, ip)
+        if check_onvif(ip, onvif_port, username, password):
+            return  # healthy — nothing to do
+
+        if attempt < retry_count:
+            log.info("Retrying in %d s…", retry_delay)
+            time.sleep(retry_delay)
+
+    # All retries exhausted — cycle the services
+    cycle_services(ip, http_port, username, password, cycle_wait)
+
+
+# ---------------------------------------------------------------------------
+# Main entry-point
+# ---------------------------------------------------------------------------
+
+def main(config_path: str = "config.yaml") -> None:
+    logger.info("Starting Reolink ONVIF Watchdog (config: %s).", config_path)
+
+    try:
+        config = load_config(config_path)
+    except FileNotFoundError:
+        logger.error("Configuration file not found: %s", config_path)
+        sys.exit(1)
+    except yaml.YAMLError as exc:
+        logger.error("Invalid YAML configuration: %s", exc)
+        sys.exit(1)
+
+    cameras = config.get("cameras", [])
+    check_interval = config.get("check_interval", DEFAULT_CONFIG["check_interval"])
+
+    if not cameras:
+        logger.error("No cameras configured. Exiting.")
+        sys.exit(1)
+
+    logger.info(
+        "Monitoring %d camera(s) every %d s.", len(cameras), check_interval
+    )
+
+    while True:
+        for camera in cameras:
+            try:
+                watch_camera(camera, config)
+            except Exception as exc:
+                logger.error(
+                    "Unexpected error while checking camera '%s': %s",
+                    camera.get("name", camera.get("ip", "?")),
+                    exc,
+                )
+        time.sleep(check_interval)
+
+
+if __name__ == "__main__":
+    config_file = sys.argv[1] if len(sys.argv) > 1 else "config.yaml"
+    main(config_file)
