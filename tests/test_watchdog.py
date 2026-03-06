@@ -82,27 +82,31 @@ class TestLoadConfig(unittest.TestCase):
 class TestGetPassword(unittest.TestCase):
     def setUp(self):
         # Clear any relevant env vars before each test
-        for key in ("CAMERA_PASSWORD", "CAMERA_PASSWORD_CAM1", "CAMERA_PASSWORD_FRONTDOOR"):
+        for key in ("CAMERA_PASSWORD", "CAMERA_1", "CAMERA_2"):
             os.environ.pop(key, None)
 
     def test_per_camera_variable(self):
-        os.environ["CAMERA_PASSWORD_CAM1"] = "secret1"
-        self.assertEqual(watchdog.get_password("cam1"), "secret1")
+        os.environ["CAMERA_1"] = "secret1"
+        self.assertEqual(watchdog.get_password(1, "cam1"), "secret1")
 
     def test_fallback_variable(self):
         os.environ["CAMERA_PASSWORD"] = "globalpass"
-        self.assertEqual(watchdog.get_password("cam1"), "globalpass")
+        self.assertEqual(watchdog.get_password(1, "cam1"), "globalpass")
 
     def test_per_camera_takes_precedence(self):
         os.environ["CAMERA_PASSWORD"] = "globalpass"
-        os.environ["CAMERA_PASSWORD_CAM1"] = "specific"
-        self.assertEqual(watchdog.get_password("cam1"), "specific")
+        os.environ["CAMERA_1"] = "specific"
+        self.assertEqual(watchdog.get_password(1, "cam1"), "specific")
+
+    def test_second_camera_index(self):
+        os.environ["CAMERA_2"] = "cam2pass"
+        self.assertEqual(watchdog.get_password(2, "cam2"), "cam2pass")
 
     def test_no_password_returns_empty(self):
-        self.assertEqual(watchdog.get_password("cam1"), "")
+        self.assertEqual(watchdog.get_password(1, "cam1"), "")
 
     def tearDown(self):
-        for key in ("CAMERA_PASSWORD", "CAMERA_PASSWORD_CAM1", "CAMERA_PASSWORD_FRONTDOOR"):
+        for key in ("CAMERA_PASSWORD", "CAMERA_1", "CAMERA_2"):
             os.environ.pop(key, None)
 
 
@@ -280,7 +284,7 @@ class TestWatchCamera(unittest.TestCase):
     @patch("watchdog.cycle_services")
     @patch("watchdog.check_onvif", return_value=True)
     def test_healthy_camera_no_cycle(self, mock_check, mock_cycle, mock_reach):
-        watchdog.watch_camera(self._cam_cfg(), self._global_cfg())
+        watchdog.watch_camera(self._cam_cfg(), self._global_cfg(), 1)
         mock_cycle.assert_not_called()
         mock_check.assert_called_once()
 
@@ -288,7 +292,7 @@ class TestWatchCamera(unittest.TestCase):
     @patch("watchdog.cycle_services")
     @patch("watchdog.check_onvif")
     def test_unreachable_camera_skips_onvif_and_cycle(self, mock_check, mock_cycle, mock_reach):
-        watchdog.watch_camera(self._cam_cfg(), self._global_cfg())
+        watchdog.watch_camera(self._cam_cfg(), self._global_cfg(), 1)
         mock_check.assert_not_called()
         mock_cycle.assert_not_called()
 
@@ -297,7 +301,7 @@ class TestWatchCamera(unittest.TestCase):
     @patch("watchdog.cycle_services")
     @patch("watchdog.check_onvif", return_value=False)
     def test_all_retries_fail_triggers_cycle(self, mock_check, mock_cycle, mock_sleep, mock_reach):
-        watchdog.watch_camera(self._cam_cfg(), self._global_cfg(retry_count=3))
+        watchdog.watch_camera(self._cam_cfg(), self._global_cfg(retry_count=3), 1)
         self.assertEqual(mock_check.call_count, 3)
         mock_cycle.assert_called_once()
 
@@ -306,7 +310,7 @@ class TestWatchCamera(unittest.TestCase):
     @patch("watchdog.cycle_services")
     @patch("watchdog.check_onvif", side_effect=[False, False, True])
     def test_succeeds_on_third_attempt_no_cycle(self, mock_check, mock_cycle, mock_sleep, mock_reach):
-        watchdog.watch_camera(self._cam_cfg(), self._global_cfg(retry_count=3))
+        watchdog.watch_camera(self._cam_cfg(), self._global_cfg(retry_count=3), 1)
         self.assertEqual(mock_check.call_count, 3)
         mock_cycle.assert_not_called()
 

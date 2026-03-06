@@ -1,8 +1,8 @@
 # Reolink ONVIF Watchdog — Configuration
 #
 # Passwords are NOT stored here. Set them as environment variables:
-#   CAMERA_PASSWORD_<NAME>   where <NAME> matches the camera name in uppercase
-#   e.g. CAMERA_PASSWORD_FRONTDOOR for the camera named "frontdoor"
+#   CAMERA_<N>   where N is the 1-based position of the camera in this file
+#   e.g. CAMERA_1 for the first camera, CAMERA_2 for the second, etc.
 #
 # A single fallback variable CAMERA_PASSWORD is used when no per-camera
 # variable is found.

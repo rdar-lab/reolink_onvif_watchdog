@@ -10,8 +10,8 @@ When a camera's ONVIF check fails repeatedly, the script:
 Configuration is read from a YAML file (default: config.yaml).
 Passwords are supplied through environment variables so that secrets are
 never stored in the configuration file:
-  - Per-camera:  CAMERA_PASSWORD_<NAME_UPPERCASE>
-                 e.g. CAMERA_PASSWORD_FRONTDOOR for a camera named "frontdoor"
+  - Per-camera:  CAMERA_<N>   where N is the 1-based position of the camera
+                 in the configuration file (e.g. CAMERA_1 for the first camera)
   - Fallback:    CAMERA_PASSWORD
 """
 
@@ -19,11 +19,17 @@ import logging
 import os
 import sys
 import time
+import urllib.parse
 from typing import Optional
 
 import requests
+import urllib3
 import yaml
 from onvif import ONVIFCamera
+
+# Reolink cameras use self-signed TLS certificates. Suppress the
+# InsecureRequestWarning that urllib3 emits for every verify=False request.
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -63,23 +69,24 @@ def load_config(path: str) -> dict:
     return config
 
 
-def get_password(camera_name: str) -> str:
+def get_password(camera_index: int, camera_name: str) -> str:
     """
     Resolve the camera password from environment variables.
 
     Lookup order:
-    1. CAMERA_PASSWORD_<NAME_UPPERCASE>  (per-camera)
-    2. CAMERA_PASSWORD                   (global fallback)
+    1. CAMERA_<N>       (per-camera, where N is the 1-based position in config)
+    2. CAMERA_PASSWORD  (global fallback)
     """
-    per_camera_var = f"CAMERA_PASSWORD_{camera_name.upper()}"
+    per_camera_var = f"CAMERA_{camera_index}"
     password = os.environ.get(per_camera_var)
     if password is None:
         password = os.environ.get("CAMERA_PASSWORD", "")
     if not password:
         logger.warning(
-            "No password found for camera '%s'. "
+            "No password found for camera '%s' (index %d). "
             "Set %s or CAMERA_PASSWORD environment variable.",
             camera_name,
+            camera_index,
             per_camera_var,
         )
     return password
@@ -136,7 +143,7 @@ def check_onvif(ip: str, onvif_port: int, username: str, password: str) -> bool:
             result.Uri,
             auth=requests.auth.HTTPDigestAuth(username, password),
             timeout=10,
-            verify=True,
+            verify=False,  # noqa: S501 — self-signed certs are common on cameras
         )
         if response.status_code == 200:
             logger.info("ONVIF check passed for %s.", ip)
@@ -159,7 +166,7 @@ def check_onvif(ip: str, onvif_port: int, username: str, password: str) -> bool:
 def _reolink_post(base_url: str, payload: list, timeout: int = 10) -> Optional[requests.Response]:
     """Send a JSON command to the Reolink HTTP API."""
     try:
-        resp = requests.post(base_url, json=payload, timeout=timeout)
+        resp = requests.post(base_url, json=payload, timeout=timeout, verify=False)  # noqa: S501
         resp.raise_for_status()
         return resp
     except Exception as exc:
@@ -185,11 +192,10 @@ def cycle_services(
     port_suffix = f":{http_port}" if http_port not in (80, 443) else ""
     scheme = "https" if http_port == 443 else "http"
     # Reolink's CGI API requires credentials in the query string.
-    # Use HTTPS (port 443) to encrypt the transport when possible.
-    base_url = (
-        f"{scheme}://{ip}{port_suffix}/cgi-bin/api.cgi"
-        f"?user={username}&password={password}"
-    )
+    # Use urllib.parse.urlencode to safely handle special characters in credentials.
+    # Use http_port 443 (HTTPS) to encrypt the query string in transit.
+    qs = urllib.parse.urlencode({"user": username, "password": password})
+    base_url = f"{scheme}://{ip}{port_suffix}/cgi-bin/api.cgi?{qs}"
 
     off_payload = [
         {
@@ -221,14 +227,14 @@ def cycle_services(
 # Per-camera watchdog loop
 # ---------------------------------------------------------------------------
 
-def watch_camera(camera_cfg: dict, global_cfg: dict) -> None:
+def watch_camera(camera_cfg: dict, global_cfg: dict, camera_index: int) -> None:
     """Run one full check cycle for a single camera."""
     name = camera_cfg.get("name", camera_cfg.get("ip", "unknown"))
     ip = camera_cfg["ip"]
     onvif_port = camera_cfg.get("onvif_port", 8000)
     http_port = camera_cfg.get("http_port", 80)
     username = camera_cfg.get("username", "admin")
-    password = get_password(name)
+    password = get_password(camera_index, name)
 
     retry_count = global_cfg.get("retry_count", DEFAULT_CONFIG["retry_count"])
     retry_delay = global_cfg.get("retry_delay", DEFAULT_CONFIG["retry_delay"])
@@ -288,9 +294,9 @@ def main(config_path: str = "config.yaml") -> None:
     )
 
     while True:
-        for camera in cameras:
+        for idx, camera in enumerate(cameras, start=1):
             try:
-                watch_camera(camera, config)
+                watch_camera(camera, config, idx)
             except Exception as exc:
                 logger.error(
                     "Unexpected error while checking camera '%s': %s",

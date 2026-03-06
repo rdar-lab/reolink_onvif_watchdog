@@ -60,27 +60,26 @@ cameras:
     username: admin
 ```
 
-> **Tip:** Use `http_port: 443` to enable HTTPS for the CGI API calls,
-> which encrypts the credentials on the wire.
-
 ## Passwords
 
 Camera passwords are **never** stored in the configuration file.
-They are injected via environment variables:
+They are injected via environment variables using the **1-based position** of
+the camera in `config.yaml`:
 
 | Variable | Scope |
 |---|---|
-| `CAMERA_PASSWORD_<NAME_UPPERCASE>` | Per-camera (takes precedence) |
+| `CAMERA_<N>` | Per-camera by position (e.g. `CAMERA_1` for the first camera) |
 | `CAMERA_PASSWORD` | Global fallback for all cameras |
 
-Examples:
+Examples for the configuration above (frontdoor = 1, backyard = 2):
 
 ```bash
-# Per-camera (camera named "frontdoor")
-export CAMERA_PASSWORD_FRONTDOOR=my_secret
+# Per-camera
+export CAMERA_1=my_frontdoor_password
+export CAMERA_2=my_backyard_password
 
 # Global fallback (applies to all cameras that have no per-camera variable)
-export CAMERA_PASSWORD=my_secret
+export CAMERA_PASSWORD=shared_password
 ```
 
 ## Running
@@ -105,8 +104,8 @@ docker build -t reolink-watchdog .
 
 ```bash
 docker run -d \
-  -e CAMERA_PASSWORD_FRONTDOOR=my_secret \
-  -e CAMERA_PASSWORD_BACKYARD=other_secret \
+  -e CAMERA_1=my_frontdoor_password \
+  -e CAMERA_2=my_backyard_password \
   reolink-watchdog
 ```
 
@@ -115,7 +114,7 @@ Mount a custom configuration file:
 ```bash
 docker run -d \
   -v /path/to/my_config.yaml:/app/config.yaml \
-  -e CAMERA_PASSWORD=my_secret \
+  -e CAMERA_PASSWORD=shared_password \
   reolink-watchdog
 ```
 
