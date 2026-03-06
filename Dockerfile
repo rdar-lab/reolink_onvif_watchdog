@@ -14,8 +14,10 @@ COPY config.yaml .
 # a custom config at /app/config.yaml.
 #
 # Passwords are injected via environment variables (never baked into the image):
-#   CAMERA_PASSWORD              — global fallback
-#   CAMERA_PASSWORD_<NAME>       — per-camera (name in uppercase)
+#   CAMERA_PASSWORD   — global fallback
+#   CAMERA_1          — password for the 1st camera in config.yaml
+#   CAMERA_2          — password for the 2nd camera in config.yaml
+#   (and so on for each camera by its 1-based position in the config)
 
 ENTRYPOINT ["python", "watchdog.py"]
 CMD ["config.yaml"]
